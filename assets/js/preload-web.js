@@ -97,6 +97,145 @@ function applyStyles(cssContent) {
   styleElement.textContent = fixedCssContent;
 }
 
+// --- 戏剧网站优化模块 ---
+const DramaSiteOptimizer = {
+  isDramaSite() {
+    const hostname = window.location.hostname;
+    return hostname.includes('movie1080') || hostname.includes('monkey-flix') || 
+           hostname.includes('letu') || hostname.includes('ncat21');
+  },
+  
+  // 拦截并阻止不必要的资源加载
+  blockUnnecessaryResources() {
+    if (!this.isDramaSite()) return;
+    
+    // 阻止广告和追踪脚本
+    const blockedDomains = [
+      'google-analytics', 'googletagmanager', 'facebook.com', 'doubleclick',
+      'adservice', 'ads.', 'analytics.', 'tracking.', 'pixel.'
+    ];
+    
+    // 拦截 script 加载
+    const originalAppendChild = Element.prototype.appendChild;
+    Element.prototype.appendChild = function(child) {
+      if (child.tagName === 'SCRIPT' && child.src) {
+        const isBlocked = blockedDomains.some(d => child.src.includes(d));
+        if (isBlocked) {
+          console.log('[DramaOptimizer] Blocked script:', child.src);
+          return child;
+        }
+      }
+      return originalAppendChild.call(this, child);
+    };
+    
+    // 拦截 iframe 加载（广告）
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        mutation.addedNodes.forEach((node) => {
+          if (node.tagName === 'IFRAME' && node.src) {
+            const isBlocked = blockedDomains.some(d => node.src.includes(d));
+            if (isBlocked) {
+              node.style.display = 'none';
+              node.src = 'about:blank';
+              console.log('[DramaOptimizer] Blocked iframe:', node.src);
+            }
+          }
+          // 延迟加载图片
+          if (node.tagName === 'IMG') {
+            if (!node.dataset.src) {
+              node.dataset.src = node.src;
+              node.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+            }
+          }
+        });
+      });
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  },
+  
+  // 显示加载进度遮罩
+  showLoadingOverlay() {
+    if (document.getElementById('drama-loading-overlay')) return;
+    
+    const overlay = document.createElement('div');
+    overlay.id = 'drama-loading-overlay';
+    overlay.innerHTML = `
+      <div style="
+        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        z-index: 2147483646; font-family: 'Microsoft YaHei', sans-serif;
+      ">
+        <div style="
+          width: 60px; height: 60px; border: 4px solid #3a3d5b;
+          border-top: 4px solid #ff6768; border-radius: 50%;
+          animation: drama-spin 1s linear infinite;
+        "></div>
+        <div style="margin-top: 20px; color: #dcdce4; font-size: 16px;">正在加载...</div>
+        <style>
+          @keyframes drama-spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+        </style>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+  },
+  
+  hideLoadingOverlay() {
+    const overlay = document.getElementById('drama-loading-overlay');
+    if (overlay) {
+      overlay.style.opacity = '0';
+      overlay.style.transition = 'opacity 0.3s';
+      setTimeout(() => overlay.remove(), 300);
+    }
+  },
+  
+  // 预加载关键链接
+  prefetchLinks() {
+    if (!this.isDramaSite()) return;
+    
+    document.addEventListener('mouseover', (event) => {
+      const anchor = event.target.closest('a');
+      if (anchor && anchor.href && anchor.href.startsWith('http')) {
+        // 使用 fetch 预连接
+        if (!anchor.dataset.prefetched) {
+          anchor.dataset.prefetched = 'true';
+          fetch(anchor.href, { method: 'HEAD', mode: 'no-cors' }).catch(() => {});
+        }
+      }
+    }, { passive: true });
+  },
+  
+  init() {
+    this.blockUnnecessaryResources();
+    this.prefetchLinks();
+    
+    // 页面加载完成后隐藏遮罩
+    window.addEventListener('load', () => {
+      setTimeout(() => this.hideLoadingOverlay(), 500);
+    });
+    
+    // 点击链接时显示遮罩
+    document.addEventListener('click', (event) => {
+      if (!this.isDramaSite()) return;
+      
+      const anchor = event.target.closest('a');
+      if (anchor && anchor.href && anchor.href.startsWith('http')) {
+        console.log('[DramaOptimizer] Link clicked:', anchor.href);
+        this.showLoadingOverlay();
+        
+        // 10秒后自动隐藏（超时保护）
+        setTimeout(() => this.hideLoadingOverlay(), 10000);
+      }
+    }, true);
+  }
+};
+
+// 初始化戏剧网站优化
+DramaSiteOptimizer.init();
+
 // --- 事件监听 ---
 
 // 监听主进程推送的样式更新
@@ -123,38 +262,7 @@ document.addEventListener('click', (event) => {
       ipcRenderer.send('proactive-parse-request', anchor.href);
     }
   }
-  // 影巢等戏剧网站点击优化 - 即时视觉反馈
-  const hostname = window.location.hostname;
-  if (hostname.includes('movie1080') || hostname.includes('monkey-flix') || hostname.includes('letu') || hostname.includes('ncat21')) {
-    const anchor = event.target.closest('a');
-    if (anchor && anchor.href) {
-      console.log('[preload-web] Drama site link clicked:', anchor.href);
-      // 添加即时视觉反馈
-      document.body.style.cursor = 'wait';
-      setTimeout(() => {
-        document.body.style.cursor = '';
-      }, 2000);
-    }
-  }
-}, true); // 使用捕获阶段以最快速度拦截事件
-
-
-// --- 戏剧网站预加载优化 ---
-// 鼠标悬停时预加载链接
-document.addEventListener('mouseover', (event) => {
-  const hostname = window.location.hostname;
-  if (hostname.includes('movie1080') || hostname.includes('monkey-flix') || hostname.includes('letu') || hostname.includes('ncat21')) {
-    const anchor = event.target.closest('a');
-    if (anchor && anchor.href && anchor.href.startsWith('http')) {
-      // 预加载链接（使用 link prefetch）
-      const link = document.createElement('link');
-      link.rel = 'prefetch';
-      link.href = anchor.href;
-      link.as = 'document';
-      document.head.appendChild(link);
-    }
-  }
-}, { passive: true });
+}, true);
 
 
 // --- DOM 监控 ---
