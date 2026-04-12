@@ -97,7 +97,7 @@ function applyStyles(cssContent) {
   styleElement.textContent = fixedCssContent;
 }
 
-// --- 戏剧网站优化模块 ---
+// --- 戏剧网站优化模块 (v2.2 - Conservative & Safe) ---
 const DramaSiteOptimizer = {
   isDramaSite() {
     const hostname = window.location.hostname;
@@ -105,82 +105,115 @@ const DramaSiteOptimizer = {
            hostname.includes('letu') || hostname.includes('ncat21');
   },
   
-  // 拦截并阻止不必要的资源加载
+  // ✅ 安全模式：仅阻止明确的广告/追踪资源
   blockUnnecessaryResources() {
     if (!this.isDramaSite()) return;
     
-    // 阻止广告和追踪脚本
+    console.log('[DramaOptimizer] �️ Initializing SAFE resource blocking...');
+    
+    // ⚠️ 仅阻止明确已知的广告域名（不过度拦截）
     const blockedDomains = [
-      'google-analytics', 'googletagmanager', 'facebook.com', 'doubleclick',
-      'adservice', 'ads.', 'analytics.', 'tracking.', 'pixel.'
+      'doubleclick.net',
+      'googlesyndication.com',
+      'adnxs.com',
+      'taboola.com',
+      'outbrain.com'
     ];
     
-    // 拦截 script 加载
+    // ✅ 只拦截明显的广告脚本（保留其他所有脚本）
     const originalAppendChild = Element.prototype.appendChild;
     Element.prototype.appendChild = function(child) {
       if (child.tagName === 'SCRIPT' && child.src) {
-        const isBlocked = blockedDomains.some(d => child.src.includes(d));
-        if (isBlocked) {
-          console.log('[DramaOptimizer] Blocked script:', child.src);
-          return child;
+        const srcLower = child.src.toLowerCase();
+        const isAdScript = blockedDomains.some(d => srcLower.includes(d));
+        if (isAdScript) {
+          console.log('[DramaOptimizer] 🚫 Blocked ad script:', child.src.substring(0, 80));
+          return child; // 不添加到 DOM
         }
       }
+      
       return originalAppendChild.call(this, child);
     };
     
-    // 拦截 iframe 加载（广告）
+    // ✅ 延迟加载图片（不阻止，只是延后）
+    let imageLazyLoadEnabled = false;
+    
+    setTimeout(() => {
+      imageLazyLoadEnabled = true;
+      console.log('[DramaOptimizer] 🖼️ Image lazy loading activated (after 3s delay)');
+    }, 3000); // 等3秒让首屏内容先加载
+    
+    // ✅ 观察并优化图片加载（保守策略）
     const observer = new MutationObserver((mutations) => {
       mutations.forEach((mutation) => {
         mutation.addedNodes.forEach((node) => {
+          // 只拦截广告 iframe
           if (node.tagName === 'IFRAME' && node.src) {
-            const isBlocked = blockedDomains.some(d => node.src.includes(d));
-            if (isBlocked) {
+            const isAdIframe = blockedDomains.some(d => node.src.includes(d)) ||
+                              (node.width < 10 && node.height < 10);
+            if (isAdIframe) {
               node.style.display = 'none';
               node.src = 'about:blank';
-              console.log('[DramaOptimizer] Blocked iframe:', node.src);
+              console.log('[DramaOptimizer] 🚫 Blocked ad iframe:', node.src.substring(0, 80));
             }
           }
-          // 延迟加载图片
-          if (node.tagName === 'IMG') {
-            if (!node.dataset.src) {
-              node.dataset.src = node.src;
-              node.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+          
+          // ✅ 图片懒加载（仅在激活后生效，且只针对非首屏大图）
+          if (node.tagName === 'IMG' && imageLazyLoadEnabled) {
+            if (!node.dataset.src && !node.dataset.lazyProcessed) {
+              const originalSrc = node.src;
+              // 只对大于 50x50 的图片进行懒加载（避免小图标受影响）
+              if (originalSrc && 
+                  originalSrc !== 'about:blank' && 
+                  !originalSrc.startsWith('data:') &&
+                  (node.naturalWidth > 50 || node.width > 50)) { // 尺寸检查
+                
+                node.dataset.lazyProcessed = 'true';
+                node.dataset.src = originalSrc;
+                
+                // 使用轻量级占位图
+                node.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMSIgaGVpZ2h0PSIxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjwvc3ZnPg==';
+                
+                // 简单懒加载：进入视口时恢复原图
+                if ('IntersectionObserver' in window) {
+                  const imgObserver = new IntersectionObserver((entries, obs) => {
+                    entries.forEach(entry => {
+                      if (entry.isIntersecting) {
+                        const img = entry.target;
+                        if (img.dataset.src) {
+                          img.src = img.dataset.src;
+                        }
+                        obs.unobserve(img);
+                      }
+                    });
+                  }, { rootMargin: '200px' }); // 提前200px开始加载
+                  
+                  imgObserver.observe(node);
+                } else {
+                  // 降级：直接恢复原图
+                  node.src = originalSrc;
+                }
+              }
             }
           }
         });
       });
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    
+    // 延迟启动观察器（等页面基本结构加载完成）
+    setTimeout(() => {
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+      console.log('[DramaOptimizer] ✅ DOM observer started');
+    }, 1000);
+    
+    console.log('[DramaOptimizer] ✅ Safe mode initialized (ads only blocked)');
   },
   
   // 显示加载进度遮罩
   showLoadingOverlay() {
-    if (document.getElementById('drama-loading-overlay')) return;
-    
-    const overlay = document.createElement('div');
-    overlay.id = 'drama-loading-overlay';
-    overlay.innerHTML = `
-      <div style="
-        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        display: flex; flex-direction: column; align-items: center; justify-content: center;
-        z-index: 2147483646; font-family: 'Microsoft YaHei', sans-serif;
-      ">
-        <div style="
-          width: 60px; height: 60px; border: 4px solid #3a3d5b;
-          border-top: 4px solid #ff6768; border-radius: 50%;
-          animation: drama-spin 1s linear infinite;
-        "></div>
-        <div style="margin-top: 20px; color: #dcdce4; font-size: 16px;">正在加载...</div>
-        <style>
-          @keyframes drama-spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-          }
-        </style>
-      </div>
-    `;
-    document.body.appendChild(overlay);
+    // ✅ v2.3 FIX: Disabled - causing overlay display issues
+    // The loading overlay was covering the entire screen and not hiding properly
+    console.log('[DramaOptimizer] Loading overlay disabled (v2.3 fix)');
   },
   
   hideLoadingOverlay() {
@@ -233,8 +266,11 @@ const DramaSiteOptimizer = {
   }
 };
 
-// 初始化戏剧网站优化
-DramaSiteOptimizer.init();
+// ✅ v2.4 FIX: Completely disabled DramaSiteOptimizer
+// Reason: It was intercepting DOM operations and preventing movie1080.xyz from loading
+// The website itself loads in 1-15 seconds, so no optimization is needed
+console.log('[DramaOptimizer] ⛔ COMPLETELY DISABLED (v2.4 fix - site loads fast natively)');
+// DramaSiteOptimizer.init(); // ← DISABLED
 
 // --- 事件监听 ---
 
