@@ -5,6 +5,100 @@ const { app, screen, BrowserWindow, BrowserView, ipcMain, session, shell, dialog
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const Store = require('electron-store');
+
+// ✅ === Settings Persistence System (v2.0) ===
+const settingsStore = new Store({
+  name: 'user-settings',
+  defaults: {
+    apiList: [],
+    dramaSites: [],
+    windowBounds: null,
+    lastPlatform: '',
+    themeMode: 'parsing'
+  },
+  encryptionKey: 'bfv2-secure-key-2024'
+});
+
+console.log(`[Settings] ✅ Store initialized at: ${settingsStore.path}`);
+
+// Settings IPC Handlers
+ipcMain.handle('settings:get', (event, key) => {
+  try {
+    return { success: true, value: settingsStore.get(key) };
+  } catch (error) {
+    console.error('[Settings] ❌ Get error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('settings:set', (event, key, value) => {
+  try {
+    settingsStore.set(key, value);
+    console.log(`[Settings] ✅ Saved ${key}:`, typeof value === 'object' ? `[${value.length} items]` : value);
+    
+    // Broadcast to all windows for real-time sync
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('settings:changed', { key, value, timestamp: Date.now() });
+      }
+    });
+    
+    return { success: true };
+  } catch (error) {
+    console.error('[Settings] ❌ Set error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('settings:getAll', () => {
+  try {
+    const allSettings = {
+      apiList: settingsStore.get('apiList') || [],
+      dramaSites: settingsStore.get('dramaSites') || [],
+      windowBounds: settingsStore.get('windowBounds'),
+      lastPlatform: settingsStore.get('lastPlatform'),
+      themeMode: settingsStore.get('themeMode')
+    };
+    return { success: true, data: allSettings };
+  } catch (error) {
+    console.error('[Settings] ❌ GetAll error:', error);
+    return { success: false, error: error.message, data: { apiList: [], dramaSites: [] } };
+  }
+});
+
+ipcMain.handle('settings:reset', (event, key) => {
+  try {
+    if (key) {
+      settingsStore.reset(key);
+    } else {
+      settingsStore.clear();
+    }
+    console.log(`[Settings] Reset: ${key || 'all'}`);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('settings:export', async () => {
+  try {
+    const filePath = dialog.showSaveDialogSync(BrowserWindow.getFocusedWindow(), {
+      title: '导出设置',
+      defaultPath: 'audiovisual-settings.json',
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    
+    if (filePath) {
+      fs.writeFileSync(filePath, JSON.stringify(settingsStore.store, null, 2));
+      return { success: true, path: filePath };
+    }
+    return { success: false };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+// === End Settings System ===
 
 // --- Debounce Utility ---
 function debounce(func, wait) {
@@ -88,8 +182,71 @@ let isSidebarCollapsed = false;
 let currentThemeCss = `:root { --av-primary-bg: #1e1e2f; --av-accent-color: #3a3d5b; --av-highlight-color: #ff6768; }`;
 const scrollbarCss = fs.readFileSync(path.join(__dirname, 'assets', 'css', 'view-style.css'), 'utf8');
 
-// --- Pre-rendering Logic ---
+// ✅ === LRU BrowserView Pool (Memory Optimized v2.0) ===
+const MAX_VIEW_POOL_SIZE = 3; // Limit to 3 cached views (down from unlimited)
 const viewPool = new Map();
+let lruOrder = [];
+
+function getLRUKey() {
+  return lruOrder.length > 0 ? lruOrder[0] : null;
+}
+
+function updateLRU(key) {
+  lruOrder = lruOrder.filter(k => k !== key);
+  lruOrder.push(key);
+}
+
+function evictLRU() {
+  const oldestKey = getLRUKey();
+  if (oldestKey && viewPool.has(oldestKey)) {
+    const oldView = viewPool.get(oldestKey);
+    
+    // ✅ 安全检查：确保 oldView 和 webContents 都存在
+    if (oldView && oldView.webContents && typeof oldView.webContents.isDestroyed === 'function') {
+      if (!oldView.webContents.isDestroyed()) {
+        console.log(`[ViewPool] 🗑️ Evicting LRU: ${oldestKey}`);
+        try {
+          oldView.webContents.destroy(); // Force destroy to free memory
+        } catch (err) {
+          console.error(`[ViewPool] ⚠️ Error destroying ${oldestKey}:`, err.message);
+        }
+      }
+    } else {
+      console.log(`[ViewPool] 🗑️ Skipping invalid view for: ${oldestKey}`);
+    }
+    
+    viewPool.delete(oldestKey);
+    lruOrder.shift();
+  }
+}
+
+function addToPool(url, viewInstance) {
+  // Auto-evict if at capacity
+  while (viewPool.size >= MAX_VIEW_POOL_SIZE) {
+    evictLRU();
+  }
+  
+  if (viewPool.has(url)) {
+    updateLRU(url);
+    return viewPool.get(url);
+  }
+  
+  viewPool.set(url, viewInstance);
+  updateLRU(url);
+  console.log(`[ViewPool] ➕ Added: ${url} (Size: ${viewPool.size}/${MAX_VIEW_POOL_SIZE})`);
+  return viewInstance;
+}
+
+function getPoolStats() {
+  return {
+    size: viewPool.size,
+    maxSize: MAX_VIEW_POOL_SIZE,
+    keys: Array.from(viewPool.keys()),
+    memoryEstimate: `${viewPool.size * 150}-${viewPool.size * 300}MB (estimated)`
+  };
+}
+// === End View Pool ===
+
 const platformHomePages = [
   'https://v.qq.com',
   'https://www.iqiyi.com',
@@ -109,11 +266,21 @@ let isPreloading = false;
 async function preloadAllSites() {
   if (isPreloading) return;
   isPreloading = true;
-  console.log('[Preload] Starting background pre-rendering...');
+  console.log('[Preload] ✨ Starting optimized pre-rendering (LRU mode)...');
   
-  const allSiteUrls = [...platformHomePages, ...dramaSites.map(s => s.url)];
+  // ✅ Only preload top 3 priority sites (not all 9)
+  const prioritySites = [
+    platformHomePages[0], // Tencent (default homepage)
+    ...dramaSites.slice(0, 2) // Top 2 drama sites
+  ].filter(Boolean);
   
-  for (const url of allSiteUrls) {
+  for (const url of prioritySites) {
+    // Stop if pool is already full
+    if (viewPool.size >= MAX_VIEW_POOL_SIZE) {
+      console.log('[Preload] Pool at capacity, stopping early.');
+      break;
+    }
+    
     if (viewPool.has(url)) continue;
     
     const siteConfig = dramaSites.find(s => s.url === url);
@@ -139,7 +306,7 @@ async function preloadAllSites() {
         
         loaded = await new Promise((resolve) => {
           const loadTimeout = setTimeout(() => {
-            console.log(`[Preload] Timeout (${timeout}ms) for ${url}, retry ${retryCount + 1}/${maxRetry}`);
+            console.log(`[Preload] ⏰ Timeout (${timeout}ms) for ${url}, retry ${retryCount + 1}/${maxRetry}`);
             resolve(false);
           }, timeout);
           
@@ -157,11 +324,10 @@ async function preloadAllSites() {
         });
         
         if (loaded) {
-          viewPool.set(url, ghostView);
-          console.log(`[Preload] Cached: ${url}`);
+          addToPool(url, ghostView); // ✅ Use LRU pool manager
         } else {
           if (!ghostView.webContents.isDestroyed()) {
-            ghostView.webContents.destroy();
+            ghostView.webContents.destroy(); // Immediate cleanup on failure
           }
           retryCount++;
         }
@@ -183,7 +349,8 @@ async function preloadAllSites() {
   }
   
   isPreloading = false;
-  console.log('[Preload] Background pre-rendering complete.');
+  console.log(`[Preload] ✅ Complete. ${getPoolStats().size}/${MAX_VIEW_POOL_SIZE} views cached.`);
+  console.log(`[Preload] 📊 Stats:`, getPoolStats());
 }
 
 function injectThemeCss(targetView) {
@@ -487,7 +654,8 @@ function createWindow() {
     }
   });
 
-ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHistory }) => {
+  // ✅ === Navigation Handler (Stable v2.5) ===
+  ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHistory }) => {
     if (themeVars) {
       currentThemeCss = `:root { ${Object.entries(themeVars).map(([key, value]) => `${key}: ${value}`).join('; ')} }`;
     }
@@ -503,7 +671,7 @@ ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHi
       
       const currentUrl = view.webContents.getURL();
       if (currentUrl && !viewPool.has(currentUrl)) {
-        viewPool.set(currentUrl, view);
+        addToPool(currentUrl, view);
       }
     }
 
@@ -515,7 +683,7 @@ ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHi
     } else {
       console.log(`[Navigate] Creating a fresh BrowserView for ${url}.`);
       view = createNewBrowserView();
-      viewPool.set(url, view);
+      addToPool(url, view);
     }
 
     view.webContents.setAudioMuted(false);
@@ -570,10 +738,12 @@ ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHi
     }
   });
 
+  // ✅ === Reset Module Handler (Stable v2.5) ===
   ipcMain.on('reset-module', (event, url) => {
     console.log(`[Reset Module] Resetting module to: ${url}`);
     
     const siteConfig = dramaSites.find(s => s.url === url);
+    const isHeavySite = url.includes('movie1080') || url.includes('monkey-flix');
     
     if (view) {
       view.webContents.stop();
@@ -587,7 +757,7 @@ ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHi
       
       const currentUrl = view.webContents.getURL();
       if (currentUrl && !viewPool.has(currentUrl)) {
-        viewPool.set(currentUrl, view);
+        addToPool(currentUrl, view);
       }
     }
     
@@ -597,7 +767,7 @@ ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHi
       isFromCache = true;
     } else {
       view = createNewBrowserView();
-      viewPool.set(url, view);
+      addToPool(url, view);
     }
     
     view.webContents.setAudioMuted(false);
@@ -605,37 +775,56 @@ ipcMain.on('navigate', async (event, { url, isPlatformSwitch, themeVars, clearHi
     updateViewBounds(true);
     
     if (!isFromCache) {
-      const timeout = siteConfig ? siteConfig.timeout : 15000;
+      const timeout = isHeavySite ? 30000 : (siteConfig ? siteConfig.timeout : 20000);
       let loadTimeoutId = null;
+      let hasTimedOut = false;
+      
+      console.log(`[Reset Module] ⏱️ Timeout set to ${timeout/1000}s for: ${url} (heavy: ${isHeavySite})`);
       
       loadTimeoutId = setTimeout(() => {
-        console.log(`[Reset Module] Load timeout for ${url}, sending load-finished`);
+        hasTimedOut = true;
+        console.log(`[Reset Module] ⚠️ Load timeout reached (${timeout/1000}s) for ${url}`);
+        
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('load-finished');
+          mainWindow.webContents.send('module-loading-timeout', { url, timeout });
         }
       }, timeout);
       
       view.webContents.once('did-finish-load', () => {
         if (loadTimeoutId) clearTimeout(loadTimeoutId);
+        
+        console.log(`[Reset Module] ✅ Page loaded: ${url} (timeout=${hasTimedOut ? 'YES' : 'NO'})`);
+        
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('load-finished');
+          mainWindow.webContents.send('module-loading-complete', { url });
         }
+        
+        injectThemeCss(view);
+        updateZoomFactor(view);
       });
       
-      view.webContents.once('did-fail-load', () => {
+      view.webContents.once('did-fail-load', (event, code, desc) => {
         if (loadTimeoutId) clearTimeout(loadTimeoutId);
+        console.log(`[Reset Module] ❌ Failed to load: ${url} - ${desc}`);
+        
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('load-finished');
+          mainWindow.webContents.send('module-loading-error', { url, error: desc });
         }
       });
       
+      console.log(`[Reset Module] 🚀 Loading URL: ${url} (timeout: ${timeout}ms, heavy: ${isHeavySite})`);
       view.webContents.loadURL(url);
     } else {
+      console.log(`[Reset Module] ♻️ Using cached view for: ${url}`);
       injectThemeCss(view);
       updateZoomFactor(view);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('url-updated', url);
         mainWindow.webContents.send('load-finished');
+        mainWindow.webContents.send('module-loading-complete', { url, fromCache: true });
       }
     }
     
@@ -778,7 +967,30 @@ app.whenReady().then(async () => {
   initializeAutoUpdater();
 });
 
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => {
+  // ✅ Clean up all cached BrowserViews to prevent memory leaks
+  console.log('[ViewPool] 🧹 Cleaning up all cached views on exit...');
+  viewPool.forEach((viewInstance, url) => {
+    // ✅ 安全检查：确保 viewInstance 和 webContents 都有效
+    if (viewInstance && viewInstance.webContents && typeof viewInstance.webContents.isDestroyed === 'function') {
+      if (!viewInstance.webContents.isDestroyed()) {
+        console.log(`[ViewPool] Destroying: ${url}`);
+        try {
+          viewInstance.webContents.destroy();
+        } catch (err) {
+          console.error(`[ViewPool] ⚠️ Error destroying ${url}:`, err.message);
+        }
+      }
+    } else {
+      console.log(`[ViewPool] Skipping invalid view: ${url}`);
+    }
+  });
+  viewPool.clear();
+  lruOrder = [];
+  console.log('[ViewPool] ✅ Cleanup complete.');
+  
+  if (process.platform !== 'darwin') app.quit();
+});
 
 ipcMain.on('open-external-link', (event, url) => {
   shell.openExternal(url);
