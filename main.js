@@ -83,7 +83,12 @@ ipcMain.handle('settings:reset', (event, key) => {
 
 ipcMain.handle('settings:export', async () => {
   try {
-    const filePath = dialog.showSaveDialogSync(BrowserWindow.getFocusedWindow(), {
+    const focusedWindow = BrowserWindow.getFocusedWindow();
+    if (!focusedWindow) {
+      return { success: false, error: 'No active window' };
+    }
+    
+    const filePath = dialog.showSaveDialogSync(focusedWindow, {
       title: '导出设置',
       defaultPath: 'audiovisual-settings.json',
       filters: [{ name: 'JSON', extensions: ['json'] }]
@@ -201,18 +206,17 @@ function evictLRU() {
   if (oldestKey && viewPool.has(oldestKey)) {
     const oldView = viewPool.get(oldestKey);
     
-    // ✅ 安全检查：确保 oldView 和 webContents 都存在
     if (oldView && oldView.webContents && typeof oldView.webContents.isDestroyed === 'function') {
       if (!oldView.webContents.isDestroyed()) {
-        console.log(`[ViewPool] 🗑️ Evicting LRU: ${oldestKey}`);
+        console.log(`[ViewPool] Evicting LRU: ${oldestKey}`);
         try {
-          oldView.webContents.destroy(); // Force destroy to free memory
+          oldView.webContents.destroy();
         } catch (err) {
-          console.error(`[ViewPool] ⚠️ Error destroying ${oldestKey}:`, err.message);
+          console.error(`[ViewPool] Error destroying ${oldestKey}:`, err.message);
         }
       }
     } else {
-      console.log(`[ViewPool] 🗑️ Skipping invalid view for: ${oldestKey}`);
+      console.log(`[ViewPool] Skipping invalid view for: ${oldestKey}`);
     }
     
     viewPool.delete(oldestKey);
@@ -759,79 +763,63 @@ function createWindow() {
       if (currentUrl && !viewPool.has(currentUrl)) {
         addToPool(currentUrl, view);
       }
+      
+      // 🛑 强制销毁可能正在播放的 view，防止后台继续播放
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.destroy();
+      }
     }
     
-    let isFromCache = false;
-    if (viewPool.has(url)) {
-      view = viewPool.get(url);
-      isFromCache = true;
-    } else {
-      view = createNewBrowserView();
-      addToPool(url, view);
-    }
+    // 🏠 首页总是创建新 view，不使用缓存，确保完全停止之前的播放
+    view = createNewBrowserView();
+    addToPool(url, view);
     
     view.webContents.setAudioMuted(false);
     mainWindow.setBrowserView(view);
     updateViewBounds(true);
     
-    if (!isFromCache) {
-      const timeout = isHeavySite ? 30000 : (siteConfig ? siteConfig.timeout : 20000);
-      let loadTimeoutId = null;
-      let hasTimedOut = false;
+    const timeout = isHeavySite ? 30000 : (siteConfig ? siteConfig.timeout : 20000);
+    let loadTimeoutId = null;
+    let hasTimedOut = false;
+    
+    console.log(`[Reset Module] ⏱️ Timeout set to ${timeout/1000}s for: ${url} (heavy: ${isHeavySite})`);
+    
+    loadTimeoutId = setTimeout(() => {
+      hasTimedOut = true;
+      console.log(`[Reset Module] ⚠️ Load timeout reached (${timeout/1000}s) for ${url}`);
       
-      console.log(`[Reset Module] ⏱️ Timeout set to ${timeout/1000}s for: ${url} (heavy: ${isHeavySite})`);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('load-finished');
+        mainWindow.webContents.send('module-loading-timeout', { url, timeout });
+      }
+    }, timeout);
+    
+    view.webContents.once('did-finish-load', () => {
+      if (loadTimeoutId) clearTimeout(loadTimeoutId);
       
-      loadTimeoutId = setTimeout(() => {
-        hasTimedOut = true;
-        console.log(`[Reset Module] ⚠️ Load timeout reached (${timeout/1000}s) for ${url}`);
-        
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('load-finished');
-          mainWindow.webContents.send('module-loading-timeout', { url, timeout });
-        }
-      }, timeout);
+      console.log(`[Reset Module] ✅ Page loaded: ${url} (timeout=${hasTimedOut ? 'YES' : 'NO'})`);
       
-      view.webContents.once('did-finish-load', () => {
-        if (loadTimeoutId) clearTimeout(loadTimeoutId);
-        
-        console.log(`[Reset Module] ✅ Page loaded: ${url} (timeout=${hasTimedOut ? 'YES' : 'NO'})`);
-        
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('load-finished');
-          mainWindow.webContents.send('module-loading-complete', { url });
-        }
-        
-        injectThemeCss(view);
-        updateZoomFactor(view);
-      });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('load-finished');
+        mainWindow.webContents.send('module-loading-complete', { url });
+      }
       
-      view.webContents.once('did-fail-load', (event, code, desc) => {
-        if (loadTimeoutId) clearTimeout(loadTimeoutId);
-        console.log(`[Reset Module] ❌ Failed to load: ${url} - ${desc}`);
-        
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('load-finished');
-          mainWindow.webContents.send('module-loading-error', { url, error: desc });
-        }
-      });
-      
-      console.log(`[Reset Module] 🚀 Loading URL: ${url} (timeout: ${timeout}ms, heavy: ${isHeavySite})`);
-      view.webContents.loadURL(url);
-    } else {
-      console.log(`[Reset Module] ♻️ Using cached view for: ${url}`);
       injectThemeCss(view);
       updateZoomFactor(view);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('url-updated', url);
-        mainWindow.webContents.send('load-finished');
-        mainWindow.webContents.send('module-loading-complete', { url, fromCache: true });
-      }
-    }
+    });
     
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('url-updated', url);
-      mainWindow.webContents.send('nav-state-updated', { canGoBack: false, canGoForward: false });
-    }
+    view.webContents.once('did-fail-load', (event, code, desc) => {
+      if (loadTimeoutId) clearTimeout(loadTimeoutId);
+      console.log(`[Reset Module] ❌ Failed to load: ${url} - ${desc}`);
+      
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('load-finished');
+        mainWindow.webContents.send('module-loading-error', { url, error: desc });
+      }
+    });
+    
+    console.log(`[Reset Module] 🚀 Loading URL: ${url} (timeout: ${timeout}ms, heavy: ${isHeavySite})`);
+    view.webContents.loadURL(url);
   });
 
   ipcMain.on('go-back', () => {

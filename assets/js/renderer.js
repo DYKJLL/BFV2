@@ -210,8 +210,6 @@ const SettingsManager = {
   }
 };
 
-SettingsManager.load(); // Async load (now uses IPC)
-
 const platformSelect = document.getElementById('platform-select');
 const apiSelect = document.getElementById('api-select');
 
@@ -333,13 +331,6 @@ quickPlatformSelect.addEventListener('change', () => {
     platformSelect.dispatchEvent(new Event('change'));
 });
 
-apiSelect.addEventListener('change', () => {
-    syncSelectors(apiSelect, quickApiSelect);
-    if (platformSelect.value !== 'https://www.youku.com') {
-        triggerParse();
-    }
-});
-
 quickApiSelect.addEventListener('change', () => {
     syncSelectors(quickApiSelect, apiSelect);
     apiSelect.dispatchEvent(new Event('change'));
@@ -405,10 +396,46 @@ homeButton.addEventListener('click', () => {
     const isDramaMode = container.classList.contains('drama-mode');
     
     if (isDramaMode) {
-        const homeUrl = dramaSites.length > 0 ? dramaSites[0].value : '';
-        if (homeUrl) {
-            window.voidAPI.resetModule(homeUrl);
+        if (dramaSites.length === 0) {
+            showToast('剧迷模式未配置站点，请先在设置中添加', 'warning');
+            return;
         }
+        
+        const currentUrl = urlInput.value.trim();
+        let homeUrl = null;
+        
+        if (currentUrl) {
+            for (const site of dramaSites) {
+                const siteUrl = site.url || site.value;
+                if (currentUrl.startsWith(siteUrl)) {
+                    homeUrl = siteUrl;
+                    console.log('[Home Button] Current site matched:', homeUrl, 'from', currentUrl);
+                    break;
+                }
+            }
+        }
+        
+        if (!homeUrl) {
+            homeUrl = quickDramaSelect.value;
+            if (!homeUrl && dramaSites.length > 0) {
+                const firstSite = dramaSites[0];
+                homeUrl = firstSite.url || firstSite.value;
+            }
+            console.log('[Home Button] Using fallback homeUrl:', homeUrl);
+        }
+        
+        if (!homeUrl) {
+            showToast('未找到可用的首页地址', 'error');
+            return;
+        }
+        
+        quickDramaSelect.value = homeUrl;
+        urlInput.value = homeUrl;
+        currentVideoUrl = homeUrl;
+        loadingOverlay.classList.remove('hidden');
+        
+        console.log('[Home Button] Navigating to:', homeUrl);
+        window.voidAPI.resetModule(homeUrl);
     } else {
         const homeUrl = platformSelect.value;
         if (homeUrl === 'https://www.youku.com') {
@@ -416,6 +443,7 @@ homeButton.addEventListener('click', () => {
             window.voidAPI.setViewVisibility(false);
             urlInput.value = '';
         } else {
+            loadingOverlay.classList.remove('hidden');
             window.voidAPI.resetModule(homeUrl);
         }
     }
@@ -754,12 +782,19 @@ function refreshDramaSidebar() {
 
 
 document.addEventListener('DOMContentLoaded', () => {
-    // ✅ Event Delegation for Drama Buttons (prevents listener accumulation)
     const dramaControlsContainer = document.querySelector('.drama-controls');
     if (dramaControlsContainer) {
         dramaControlsContainer.addEventListener('click', (e) => {
             const btn = e.target.closest('.custom-drama-btn');
             if (btn && btn.dataset.url) {
+                const dramaSite = dramaSites.find(site => {
+                    const siteUrl = site.url || site.value;
+                    return siteUrl === btn.dataset.url;
+                });
+                if (dramaSite) {
+                    quickDramaSelect.value = btn.dataset.url;
+                }
+                loadingOverlay.classList.remove('hidden');
                 window.voidAPI.resetModule(btn.dataset.url);
             }
         });
